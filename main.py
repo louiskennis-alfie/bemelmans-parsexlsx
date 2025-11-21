@@ -32,6 +32,63 @@ HEADER_KEYWORDS: Dict[str, List[str]] = {
 ARTICLE_CODE_REGEX = re.compile(r"^\d{3}(\.\d+)*(\.[A-Z])?\.$")
 
 
+def find_best_xls_sheet(book: xlrd.book.Book) -> xlrd.sheet.Sheet:
+    """
+    Choisit la feuille .xls la plus probable pour contenir le BOQ.
+    Critères :
+      - feuille visible (visibility == 0)
+      - nombre de lignes (plus il y en a, mieux c'est)
+      - présence de mots-clés typiques de BOQ dans les premières lignes
+    """
+    KEYWORDS = [
+        "quant", "hoeveel",  # quantités FR/NL
+        "unité", "unit", "eenheid", "u.", "un.",  # unités
+        "description", "omschrijving",
+        "post", "poste",
+        "boq", "métré", "metre"
+    ]
+
+    best_sheet = None
+    best_score = float("-inf")
+
+    for sh in book.sheets():
+        score = 0
+
+        # 1) visibilité : visible = gros bonus
+        visibility = getattr(sh, "visibility", 0)  # 0 = visible, 1 = hidden, 2 = very hidden
+        if visibility == 0:
+            score += 100
+        elif visibility == 1:
+            score -= 50
+        else:
+            score -= 80
+
+        # 2) nb de lignes : plus il y a de lignes, plus c'est potentiellement un BOQ
+        score += min(sh.nrows, 2000) * 0.1  # on cappe un peu
+
+        # 3) mots-clés dans les premières lignes (ex: 10 lignes)
+        max_rows_to_scan = min(10, sh.nrows)
+        for r in range(max_rows_to_scan):
+            try:
+                row_vals = [str(cell.value).lower() for cell in sh.row(r)]
+            except IndexError:
+                continue
+            row_text = " ".join(row_vals)
+            for kw in KEYWORDS:
+                if kw in row_text:
+                    score += 20  # chaque mot-clé trouvé booste le score
+
+        if score > best_score:
+            best_score = score
+            best_sheet = sh
+
+    # par sécurité
+    if best_sheet is None:
+        best_sheet = book.sheet_by_index(0)
+
+    return best_sheet
+
+
 # ---------- Helpers bas niveau ----------
 
 def extract_visible_rows_from_active_sheet(
@@ -113,27 +170,21 @@ def extract_visible_rows_from_active_sheet(
         }
 
     # ----- Cas XLS (ancien format binaire) : xlrd -----
+        # ----- Cas XLS (ancien format binaire) : xlrd -----
     elif file_extension == ".xls":
         try:
             book = xlrd.open_workbook(file_contents=content, formatting_info=True)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier XLS (xlrd): {e}")
 
-        # choisir la première feuille visible
-        sheet = None
-        for sh in book.sheets():
-            # visibility: 0 = visible, 1 = hidden, 2 = very hidden
-            if getattr(sh, "visibility", 0) == 0:
-                sheet = sh
-                break
-        if sheet is None:
-            sheet = book.sheet_by_index(0)
-
+        # 👉 utiliser notre heuristique pour choisir la "meilleure" feuille BOQ
+        sheet = find_best_xls_sheet(book)
         sheet_name = sheet.name
+
         rows_out: List[Dict[str, Any]] = []
 
         for r in range(sheet.nrows):
-            # rowinfo_map: infos de format, dont hidden
+            # rowinfo_map: infos de format, dont hidden (0-based)
             row_info = sheet.rowinfo_map.get(r)
             if row_info is not None and getattr(row_info, "hidden", 0):
                 continue  # ligne cachée
