@@ -310,8 +310,8 @@ async def parse_excel(
     - lit la dernière feuille ouverte
     - retourne les lignes visibles en JSON
     """
-    if not file.filename.lower().endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
-        raise HTTPException(status_code=400, detail="Le fichier doit être un Excel .xlsx / .xlsm / .xltx / .xltm")
+    if not file.filename.lower().endswith((".xlsx", ".xlsm", ".xltx", ".xltm", ".xls")):
+        raise HTTPException(status_code=400, detail="Le fichier doit être un Excel .xlsx / .xlsm / .xltx / .xltm / .xls")
 
     content = await file.read()
 
