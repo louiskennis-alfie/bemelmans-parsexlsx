@@ -109,23 +109,31 @@ def extract_visible_rows_from_active_sheet(
 def detect_column_roles(
     rows_preview: List[Dict[str, Any]],
     quantity_header_hint: Optional[str] = None,
+    unit_header_hint: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     Détecte les rôles de colonnes (quantity, unit, amount, weight_kg, …)
     à partir d'un aperçu de quelques lignes.
 
-    Si quantity_header_hint est fourni, on cherche d'abord une cellule
-    dont le texte contient ce hint pour fixer la colonne de quantité.
-    Sinon, on utilise les HEADER_KEYWORDS.
+    Le comportement est le suivant :
+    - On utilise d'abord les HEADER_KEYWORDS pour détecter automatiquement
+      toutes les colonnes possibles (quantity, unit, amount, weight_kg, …).
+    - Puis, si quantity_header_hint est fourni, on force la colonne quantity.
+    - Puis, si unit_header_hint est fourni, on force la colonne unit.
+
+    Les hints ont priorité totale sur la détection automatique.
     """
     roles: Dict[str, set[str]] = {}
 
-    # 1️⃣ Détection "classique" via keywords (toutes les colonnes)
+    # -----------------------------
+    # 1️⃣ Détection automatique via keywords
+    # -----------------------------
     for row in rows_preview:
         for cell in row["cells"]:
             raw = cell["value"]
             if raw is None:
                 continue
+
             v = str(raw).strip().lower()
             if not v:
                 continue
@@ -135,24 +143,41 @@ def detect_column_roles(
                     col = cell["col_letter"]
                     roles.setdefault(role, set()).add(col)
 
+    # On simplifie : une seule colonne par rôle
     simplified: Dict[str, str] = {role: sorted(cols)[0] for role, cols in roles.items()}
 
-    # 2️⃣ Si un hint pour la quantité est fourni, on le fait passer en priorité
-    if quantity_header_hint:
-        hint = quantity_header_hint.strip().lower()
-        # on re-scanne l'aperçu pour trouver la cellule dont le texte contient le hint
+    # -----------------------------
+    # Helper interne : chercher une colonne via un hint texte
+    # -----------------------------
+    def find_col_by_hint(hint: str) -> Optional[str]:
+        hint_norm = hint.strip().lower()
         for row in rows_preview:
             for cell in row["cells"]:
                 raw = cell["value"]
                 if raw is None:
                     continue
-                # on normalise un peu : espaces, sauts de ligne, barre verticale
+                # normalisation légère : retirer barres verticales, sauts de ligne
                 v = str(raw)
                 v_norm = " ".join(v.replace("|", " ").split()).lower()
-                if hint in v_norm:
-                    simplified["quantity"] = cell["col_letter"]  # 👈 override
-                    # on sort dès qu'on a trouvé une colonne
-                    return simplified
+                if hint_norm in v_norm:
+                    return cell["col_letter"]
+        return None
+
+    # -----------------------------
+    # 2️⃣ HINT QUANTITY (override)
+    # -----------------------------
+    if quantity_header_hint:
+        col = find_col_by_hint(quantity_header_hint)
+        if col:
+            simplified["quantity"] = col
+
+    # -----------------------------
+    # 3️⃣ HINT UNIT (override)
+    # -----------------------------
+    if unit_header_hint:
+        col = find_col_by_hint(unit_header_hint)
+        if col:
+            simplified["unit"] = col
 
     return simplified
 
@@ -304,6 +329,7 @@ async def parse_excel(
     file: UploadFile = File(...),
     max_rows: Optional[int] = None,
     quantity_header_hint: Optional[str] = None,
+    unit_header_hint: Optional[str] = None,
 ):
     """
     Endpoint principal :
@@ -331,7 +357,7 @@ async def parse_excel(
     
     # Aperçu pour la détection des colonnes (20–30 premières lignes)
     rows_preview = rows[:30]
-    column_roles = detect_column_roles(rows_preview, quantity_header_hint=quantity_header_hint)
+    column_roles = detect_column_roles(rows_preview, quantity_header_hint=quantity_header_hint, unit_header_hint=unit_header_hint)
 
     # Normalisation des lignes
     boq_lines = [to_boq_line(row, column_roles) for row in rows]
