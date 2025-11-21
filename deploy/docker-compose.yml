@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  xlsx_api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: xlsx_api
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # Nombre de workers uvicorn
+      WORKERS: ${WORKERS:-2}
+      # Active ou non le CORS
+      ENABLE_CORS: ${ENABLE_CORS:-false}
+    restart: unless-stopped
