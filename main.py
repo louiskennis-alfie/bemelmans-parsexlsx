@@ -340,10 +340,10 @@ async def parse_excel(
     - produit des lignes BOQ normalisées
     - renvoie aussi un résumé global
     """
-    if not file.filename.lower().endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+    if not file.filename.lower().endswith((".xlsx", ".xlsm", ".xltx", ".xltm", ".xls")):
         raise HTTPException(
             status_code=400,
-            detail="Le fichier doit être un Excel .xlsx / .xlsm / .xltx / .xltm",
+            detail="Le fichier doit être un Excel .xlsx / .xlsm / .xltx / .xltm / .xls",
         )
 
     content = await file.read()
