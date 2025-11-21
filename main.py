@@ -6,6 +6,8 @@ from openpyxl.cell.cell import MergedCell
 from typing import List, Dict, Any, Optional
 import io
 import re
+import os
+import xlrd  # 👈 pour les fichiers .xls
 
 app = FastAPI(title="Excel BOQ Parser v2")
 
@@ -34,76 +36,154 @@ ARTICLE_CODE_REGEX = re.compile(r"^\d{3}(\.\d+)*(\.[A-Z])?\.$")
 
 def extract_visible_rows_from_active_sheet(
     content: bytes,
+    file_extension: str,
     max_rows: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Ouvre un fichier Excel, prend la dernière feuille active,
-    renvoie les lignes visibles sous forme JSON.
-    Ignore les lignes cachées et les lignes totalement vides.
+    Ouvre un fichier Excel, prend la dernière feuille active (xlsx) ou
+    la première feuille visible (xls), renvoie les lignes visibles sous
+    forme JSON. Ignore les lignes cachées et les lignes totalement vides.
     """
-    try:
-        wb = load_workbook(io.BytesIO(content), data_only=True)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier Excel: {e}")
+    file_extension = file_extension.lower()
 
-    ws = wb.active  # feuille active (dernière ouverte)
-    sheet_name = ws.title
+    # ----- Cas XLSX / XLSM / XLTX / XLTM : openpyxl -----
+    if file_extension in (".xlsx", ".xlsm", ".xltx", ".xltm"):
+        try:
+            wb = load_workbook(io.BytesIO(content), data_only=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier Excel (openpyxl): {e}")
 
-    rows_out: List[Dict[str, Any]] = []
+        ws = wb.active  # feuille active (dernière ouverte)
+        sheet_name = ws.title
 
-    for row in ws.iter_rows():
-        first_cell = row[0]
-        row_idx = first_cell.row
+        rows_out: List[Dict[str, Any]] = []
 
-        # Ligne cachée ?
-        row_dim = ws.row_dimensions.get(row_idx)
-        if row_dim is not None and row_dim.hidden:
-            continue
+        for row in ws.iter_rows():
+            first_cell = row[0]
+            row_idx = first_cell.row
 
-        cells = []
-        all_empty = True
+            # Ligne cachée ?
+            row_dim = ws.row_dimensions.get(row_idx)
+            if row_dim is not None and row_dim.hidden:
+                continue
 
-        for cell in row:
-            col_index = cell.column
-            col_letter = get_column_letter(col_index)
-            address = f"{col_letter}{cell.row}"
+            cells = []
+            all_empty = True
 
-            if isinstance(cell, MergedCell):
-                value = None
-            else:
-                value = cell.value
+            for cell in row:
+                col_index = cell.column
+                col_letter = get_column_letter(col_index)
+                address = f"{col_letter}{cell.row}"
 
-            if value is not None and str(value).strip() != "":
-                all_empty = False
+                if isinstance(cell, MergedCell):
+                    value = None
+                else:
+                    value = cell.value
 
-            cells.append(
+                if value is not None and str(value).strip() != "":
+                    all_empty = False
+
+                cells.append(
+                    {
+                        "address": address,
+                        "col_index": col_index,
+                        "col_letter": col_letter,
+                        "row_index": cell.row,
+                        "value": value,
+                    }
+                )
+
+            if all_empty:
+                continue
+
+            rows_out.append(
                 {
-                    "address": address,
-                    "col_index": col_index,
-                    "col_letter": col_letter,
-                    "row_index": cell.row,
-                    "value": value,
+                    "row_index": row_idx,
+                    "cells": cells,
                 }
             )
 
-        if all_empty:
-            continue
+            if max_rows is not None and len(rows_out) >= max_rows:
+                break
 
-        rows_out.append(
-            {
-                "row_index": row_idx,
-                "cells": cells,
-            }
-        )
+        return {
+            "sheet_name": sheet_name,
+            "row_count": len(rows_out),
+            "rows": rows_out,
+        }
 
-        if max_rows is not None and len(rows_out) >= max_rows:
-            break
+    # ----- Cas XLS (ancien format binaire) : xlrd -----
+    elif file_extension == ".xls":
+        try:
+            book = xlrd.open_workbook(file_contents=content, formatting_info=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Impossible de lire le fichier XLS (xlrd): {e}")
 
-    return {
-        "sheet_name": sheet_name,
-        "row_count": len(rows_out),
-        "rows": rows_out,
-    }
+        # choisir la première feuille visible
+        sheet = None
+        for sh in book.sheets():
+            # visibility: 0 = visible, 1 = hidden, 2 = very hidden
+            if getattr(sh, "visibility", 0) == 0:
+                sheet = sh
+                break
+        if sheet is None:
+            sheet = book.sheet_by_index(0)
+
+        sheet_name = sheet.name
+        rows_out: List[Dict[str, Any]] = []
+
+        for r in range(sheet.nrows):
+            # rowinfo_map: infos de format, dont hidden
+            row_info = sheet.rowinfo_map.get(r)
+            if row_info is not None and getattr(row_info, "hidden", 0):
+                continue  # ligne cachée
+
+            cells = []
+            all_empty = True
+            excel_row_index = r + 1  # 1-based pour rester cohérent avec openpyxl
+
+            for c in range(sheet.ncols):
+                cell_obj = sheet.cell(r, c)
+                value = cell_obj.value
+
+                if value not in (None, "") and str(value).strip() != "":
+                    all_empty = False
+
+                col_index = c + 1  # 1-based
+                col_letter = get_column_letter(col_index)
+                address = f"{col_letter}{excel_row_index}"
+
+                cells.append(
+                    {
+                        "address": address,
+                        "col_index": col_index,
+                        "col_letter": col_letter,
+                        "row_index": excel_row_index,
+                        "value": value,
+                    }
+                )
+
+            if all_empty:
+                continue
+
+            rows_out.append(
+                {
+                    "row_index": excel_row_index,
+                    "cells": cells,
+                }
+            )
+
+            if max_rows is not None and len(rows_out) >= max_rows:
+                break
+
+        return {
+            "sheet_name": sheet_name,
+            "row_count": len(rows_out),
+            "rows": rows_out,
+        }
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Extension de fichier non supportée: {file_extension}")
 
 
 def detect_column_roles(
@@ -115,19 +195,12 @@ def detect_column_roles(
     Détecte les rôles de colonnes (quantity, unit, amount, weight_kg, …)
     à partir d'un aperçu de quelques lignes.
 
-    Le comportement est le suivant :
-    - On utilise d'abord les HEADER_KEYWORDS pour détecter automatiquement
-      toutes les colonnes possibles (quantity, unit, amount, weight_kg, …).
-    - Puis, si quantity_header_hint est fourni, on force la colonne quantity.
-    - Puis, si unit_header_hint est fourni, on force la colonne unit.
-
-    Les hints ont priorité totale sur la détection automatique.
+    - Détection auto via HEADER_KEYWORDS
+    - Puis override via quantity_header_hint / unit_header_hint si fournis.
     """
     roles: Dict[str, set[str]] = {}
 
-    # -----------------------------
     # 1️⃣ Détection automatique via keywords
-    # -----------------------------
     for row in rows_preview:
         for cell in row["cells"]:
             raw = cell["value"]
@@ -146,9 +219,7 @@ def detect_column_roles(
     # On simplifie : une seule colonne par rôle
     simplified: Dict[str, str] = {role: sorted(cols)[0] for role, cols in roles.items()}
 
-    # -----------------------------
     # Helper interne : chercher une colonne via un hint texte
-    # -----------------------------
     def find_col_by_hint(hint: str) -> Optional[str]:
         hint_norm = hint.strip().lower()
         for row in rows_preview:
@@ -156,24 +227,19 @@ def detect_column_roles(
                 raw = cell["value"]
                 if raw is None:
                     continue
-                # normalisation légère : retirer barres verticales, sauts de ligne
                 v = str(raw)
                 v_norm = " ".join(v.replace("|", " ").split()).lower()
                 if hint_norm in v_norm:
                     return cell["col_letter"]
         return None
 
-    # -----------------------------
     # 2️⃣ HINT QUANTITY (override)
-    # -----------------------------
     if quantity_header_hint:
         col = find_col_by_hint(quantity_header_hint)
         if col:
             simplified["quantity"] = col
 
-    # -----------------------------
     # 3️⃣ HINT UNIT (override)
-    # -----------------------------
     if unit_header_hint:
         col = find_col_by_hint(unit_header_hint)
         if col:
@@ -183,9 +249,6 @@ def detect_column_roles(
 
 
 def detect_article_code(cells: List[Dict[str, Any]]) -> Optional[str]:
-    """
-    Cherche un code article de type 003.03.51.A. dans les cellules d'une ligne.
-    """
     for cell in cells:
         raw = cell["value"]
         if raw is None:
@@ -212,9 +275,6 @@ def cell_by_col_letter(cells: List[Dict[str, Any]], col_letter: str) -> Optional
 
 
 def to_boq_line(row: Dict[str, Any], column_roles: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Transforme une ligne brute {row_index, cells[]} en ligne BOQ normalisée.
-    """
     cells = row["cells"]
 
     article_code = detect_article_code(cells)
@@ -267,10 +327,6 @@ def to_boq_line(row: Dict[str, Any], column_roles: Dict[str, str]) -> Dict[str, 
 
 
 def summarize_boq_lines(boq_lines: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Fait un petit récap global : totaux de quantités et poids kg.
-    Tu peux enrichir plus tard (par unité, par article, etc.).
-    """
     total_quantity = 0.0
     total_weight_kg = 0.0
 
@@ -302,71 +358,79 @@ def health():
 @app.post("/parse_excel")
 async def parse_excel(
     file: UploadFile = File(...),
-    max_rows: int | None = None,
+    max_rows: Optional[int] = None,
 ):
     """
-    Endpoint principal :
-    - reçoit un fichier Excel (champ 'file')
-    - lit la dernière feuille ouverte
+    Endpoint brut :
+    - reçoit un fichier Excel (xlsx/xls)
+    - lit la dernière feuille active ou première visible
     - retourne les lignes visibles en JSON
     """
-    if not file.filename.lower().endswith((".xlsx", ".xlsm", ".xltx", ".xltm", ".xls")):
-        raise HTTPException(status_code=400, detail="Le fichier doit être un Excel .xlsx / .xlsm / .xltx / .xltm / .xls")
+    filename = file.filename or "uploaded"
+    _, ext = os.path.splitext(filename)
+    ext = ext.lower()
 
-    content = await file.read()
-
-    data = extract_visible_rows_from_active_sheet(content, max_rows=max_rows)
-
-    return {
-        "filename": file.filename,
-        "sheet_name": data["sheet_name"],
-        "row_count": data["row_count"],
-        "rows": data["rows"],
-    }
-
-@app.post("/parse_excel_transformed")
-async def parse_excel(
-    file: UploadFile = File(...),
-    max_rows: Optional[int] = None,
-    quantity_header_hint: Optional[str] = None,
-    unit_header_hint: Optional[str] = None,
-):
-    """
-    Endpoint principal :
-    - reçoit un fichier Excel (champ 'file')
-    - lit la dernière feuille ouverte
-    - ignore les lignes cachées
-    - détecte les rôles des colonnes
-    - produit des lignes BOQ normalisées
-    - renvoie aussi un résumé global
-    """
-    if not file.filename.lower().endswith((".xlsx", ".xlsm", ".xltx", ".xltm", ".xls")):
+    if ext not in (".xlsx", ".xlsm", ".xltx", ".xltm", ".xls"):
         raise HTTPException(
             status_code=400,
             detail="Le fichier doit être un Excel .xlsx / .xlsm / .xltx / .xltm / .xls",
         )
 
     content = await file.read()
-    
+
+    data = extract_visible_rows_from_active_sheet(content, ext, max_rows=max_rows)
+
+    return {
+        "filename": filename,
+        "sheet_name": data["sheet_name"],
+        "row_count": data["row_count"],
+        "rows": data["rows"],
+    }
 
 
-    # 👇 on passe le hint à la détection
+@app.post("/parse_excel_transformed")
+async def parse_excel_transformed(
+    file: UploadFile = File(...),
+    max_rows: Optional[int] = None,
+    quantity_header_hint: Optional[str] = None,
+    unit_header_hint: Optional[str] = None,
+):
+    """
+    Endpoint transformé :
+    - reçoit un fichier Excel (xlsx/xls)
+    - lit la dernière feuille active / première visible
+    - ignore les lignes cachées
+    - détecte les rôles des colonnes (avec hints optionnels)
+    - produit des lignes BOQ normalisées
+    - renvoie aussi un résumé global
+    """
+    filename = file.filename or "uploaded"
+    _, ext = os.path.splitext(filename)
+    ext = ext.lower()
 
-    data = extract_visible_rows_from_active_sheet(content, max_rows=max_rows)
+    if ext not in (".xlsx", ".xlsm", ".xltx", ".xltm", ".xls"):
+        raise HTTPException(
+            status_code=400,
+            detail="Le fichier doit être un Excel .xlsx / .xlsm / .xltx / .xltm / .xls",
+        )
+
+    content = await file.read()
+
+    data = extract_visible_rows_from_active_sheet(content, ext, max_rows=max_rows)
     rows = data["rows"]
-    
-    # Aperçu pour la détection des colonnes (20–30 premières lignes)
+
     rows_preview = rows[:30]
-    column_roles = detect_column_roles(rows_preview, quantity_header_hint=quantity_header_hint, unit_header_hint=unit_header_hint)
+    column_roles = detect_column_roles(
+        rows_preview,
+        quantity_header_hint=quantity_header_hint,
+        unit_header_hint=unit_header_hint,
+    )
 
-    # Normalisation des lignes
     boq_lines = [to_boq_line(row, column_roles) for row in rows]
-
-    # Résumé global
     summary = summarize_boq_lines(boq_lines)
 
     return {
-        "filename": file.filename,
+        "filename": filename,
         "sheet_name": data["sheet_name"],
         "row_count": data["row_count"],
         "column_roles": column_roles,
