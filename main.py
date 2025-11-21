@@ -21,7 +21,7 @@ app.add_middleware(
 # Mots-clés pour détecter les rôles de colonnes
 HEADER_KEYWORDS: Dict[str, List[str]] = {
     "quantity": ["quantité", "qté", "qte", "qty", "hoeveelheid"],
-    "unit": ["unité", "unit", "eenheid"],
+    "unit": ["unité", "unit", "eenheid", "u", "u.", "un", "un."],
     "unit_price": ["pu", "prix unitaire", "unit price", "eenheidsprijs"],
     "amount": ["montant", "total", "totaal", "amount", "sommes"],
     "weight_kg": ["kg", "poids", "gewicht"],
